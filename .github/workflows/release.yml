@@ -1,7 +1,8 @@
 # Builds installers for all platforms when a version tag (v1.2.3) is pushed,
 # then publishes a GitHub Release with a signed update manifest.
 #
-# Required secrets:
+# Required secrets, in the `release` environment (Settings > Environments),
+# which should be limited to `v*` tags so nothing else can read them:
 #   UPDATE_SIGNING_KEY          base64 Ed25519 key (cargo xtask keygen)
 #   APPLE_CERTIFICATE_P12       base64 "Developer ID Application" .p12
 #   APPLE_CERTIFICATE_PASSWORD  password for that .p12
@@ -62,6 +63,7 @@ jobs:
   macos:
     needs: version
     runs-on: macos-latest
+    environment: release
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -119,6 +121,7 @@ jobs:
   publish:
     needs: [version, windows, macos, linux]
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

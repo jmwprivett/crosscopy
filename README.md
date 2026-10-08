@@ -64,9 +64,9 @@ The `Release` workflow builds the Windows installer, the signed and notarized ma
 the Linux tarball, writes `latest.json`, signs it, and publishes a GitHub Release. Running
 apps pick it up within 6 hours, or immediately via **Check for updates**.
 
-Secrets the workflow needs: `UPDATE_SIGNING_KEY`, `APPLE_CERTIFICATE_P12`,
-`APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_APP_PASSWORD`, `APPLE_TEAM_ID` (details at the
-top of `.github/workflows/release.yml`).
+Secrets live in a `release` environment (Settings → Environments) restricted to `v*` tags:
+`UPDATE_SIGNING_KEY`, `APPLE_CERTIFICATE_P12`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`,
+`APPLE_APP_PASSWORD`, `APPLE_TEAM_ID` (details at the top of `.github/workflows/release.yml`).
 
 ## Design notes
 
