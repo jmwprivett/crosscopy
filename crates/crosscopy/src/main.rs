@@ -1,22 +1,13 @@
-mod clipboard;
-mod config;
-
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use config::{Config, Paths, PeerConfig};
-use crosscopy_core::{DeviceId, Message};
-use crosscopy_net::pairing::{Pairing, PairingEvent, PendingPair};
-use crosscopy_net::{Identity, Node, NodeOptions};
-use std::collections::HashSet;
+use crosscopy::config::{Config, Paths, PeerConfig};
+use crosscopy::daemon::{self, Control, SharedStatus};
+use crosscopy::{clipboard, pair};
+use crosscopy_core::DeviceId;
+use crosscopy_net::Identity;
 use std::io::Write;
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
-use tracing::{info, warn};
-
-/// How often the daemon checks the config file for changes.
-const CONFIG_POLL: Duration = Duration::from_secs(2);
-const PAIR_TIMEOUT: Duration = Duration::from_secs(120);
+use std::path::PathBuf;
+use tracing::info;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -31,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the sync daemon.
+    /// Run the sync daemon in the foreground (the tray app does this too).
     Run,
     /// Pair with another device. Run this on both devices at the same time.
     Pair {
@@ -75,10 +66,7 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let paths = match cli.config_dir {
-        Some(dir) => Paths { config_file: dir.join("config.toml"), identity_dir: dir.join("identity") },
-        None => Paths::new()?,
-    };
+    let paths = Paths::new(cli.config_dir)?;
 
     match cli.command {
         Command::Run => run(&paths),
@@ -94,77 +82,16 @@ fn main() -> Result<()> {
 }
 
 fn run(paths: &Paths) -> Result<()> {
-    let config = Config::load(&paths.config_file)?;
-    let identity = Identity::load_or_create(&paths.identity_dir)?;
-    let peers = config.peers()?;
-    if peers.is_empty() {
-        warn!("no devices paired yet; run `crosscopy pair` here and on the other device");
-    }
-
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        let (local_tx, mut local_rx) = tokio::sync::mpsc::channel(16);
-        let clipboard = clipboard::spawn(identity.id, local_tx)?;
-        let options = NodeOptions {
-            listen: SocketAddr::from(([0, 0, 0, 0], config.port)),
-            device_name: config.device_name(),
-            discovery: true,
-        };
-        let (node, mut inbox) = Node::start(&identity, options, peers)?;
-        info!(name = %config.device_name(), code = %identity.id, port = config.port, "crosscopy running");
-
-        let mut config_stamp = modified(&paths.config_file);
-        let mut config_poll = tokio::time::interval(CONFIG_POLL);
-        loop {
-            tokio::select! {
-                Some(item) = local_rx.recv() => {
-                    let bytes = item.text().map_or(0, str::len);
-                    match node.broadcast(&Message::Clip(item)) {
-                        0 => info!(bytes, "copied, but no peers are connected"),
-                        n => info!(bytes, peers = n, "sent clip"),
-                    }
-                }
-                Some(incoming) = inbox.recv() => match incoming.message {
-                    Message::Hello => {}
-                    Message::Clip(item) => clipboard.apply(item, incoming.from_name),
-                },
-                _ = config_poll.tick() => {
-                    let stamp = modified(&paths.config_file);
-                    if stamp != config_stamp {
-                        config_stamp = stamp;
-                        reload_peers(&paths.config_file, &node, config.port);
-                    }
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    info!("shutting down");
-                    break;
-                }
+        let (control, control_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = control.send(Control::Shutdown);
             }
-        }
-        node.shutdown().await;
-        Ok(())
+        });
+        daemon::run(paths, control_rx, SharedStatus::default()).await
     })
-}
-
-fn modified(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
-}
-
-fn reload_peers(path: &Path, node: &Node, running_port: u16) {
-    let config = match Config::load(path) {
-        Ok(config) => config,
-        Err(e) => return warn!("ignoring config change: {e:#}"),
-    };
-    match config.peers() {
-        Ok(peers) => {
-            info!(peers = peers.len(), "config changed; updating paired devices");
-            node.set_peers(peers);
-        }
-        Err(e) => warn!("ignoring config change: {e:#}"),
-    }
-    if config.port != running_port {
-        warn!("port changes take effect after restarting crosscopy");
-    }
 }
 
 fn pair(paths: &Paths, only: Option<String>) -> Result<()> {
@@ -174,48 +101,18 @@ fn pair(paths: &Paths, only: Option<String>) -> Result<()> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        let mut pairing = Pairing::start(&identity, &name)?;
         println!("Pairing as \"{name}\". Run `crosscopy pair` on the other device too.");
-        println!("Searching the local network (up to {} s, Ctrl+C to cancel)...", PAIR_TIMEOUT.as_secs());
-
-        let wanted = |device: &str| only.as_ref().is_none_or(|n| n.eq_ignore_ascii_case(device));
-        // mDNS re-announces per interface; only mention each device once.
-        let mut seen = HashSet::new();
-        let deadline = tokio::time::sleep(PAIR_TIMEOUT);
-        tokio::pin!(deadline);
-        let pending: PendingPair = loop {
-            tokio::select! {
-                event = pairing.next() => match event {
-                    Some(PairingEvent::Found(candidate)) if wanted(&candidate.name) => {
-                        if seen.insert(candidate.id) {
-                            println!("Found \"{}\".", candidate.name);
-                        }
-                        // Exactly one side starts the session, so both
-                        // devices end up confirming the same one.
-                        if identity.id < candidate.id {
-                            match pairing.connect(&candidate).await {
-                                Ok(pending) => break pending,
-                                Err(e) => println!("Couldn't reach \"{}\": {e:#}", candidate.name),
-                            }
-                        }
-                    }
-                    Some(PairingEvent::Found(candidate)) => {
-                        if seen.insert(candidate.id) {
-                            println!("Ignoring \"{}\".", candidate.name);
-                        }
-                    }
-                    Some(PairingEvent::Incoming(pending)) if wanted(&pending.peer_name) => break pending,
-                    Some(PairingEvent::Incoming(pending)) => {
-                        tokio::spawn(pending.finish(false));
-                    }
-                    Some(PairingEvent::Lost(_)) => {}
-                    None => bail!("pairing stopped unexpectedly"),
-                },
-                _ = &mut deadline => bail!(
-                    "no device found. Is `crosscopy pair` running on the other device, on the same network?"
-                ),
-                _ = tokio::signal::ctrl_c() => bail!("cancelled"),
+        println!("Searching the local network (up to {} s, Ctrl+C to cancel)...", pair::PAIR_TIMEOUT.as_secs());
+        let found = pair::find(&identity, &name, only.as_deref(), |device, wanted| {
+            if wanted {
+                println!("Found \"{device}\".");
+            } else {
+                println!("Ignoring \"{device}\".");
             }
+        });
+        let (_pairing, pending) = tokio::select! {
+            result = found => result?,
+            _ = tokio::signal::ctrl_c() => bail!("cancelled"),
         };
 
         println!();
@@ -234,12 +131,8 @@ fn pair(paths: &Paths, only: Option<String>) -> Result<()> {
             println!("The other device declined. Nothing was saved.");
             return Ok(());
         }
-
-        // Reload in case the config changed while we were waiting.
-        let mut config = Config::load(&paths.config_file)?;
-        let saved_as = config.upsert_peer(peer_id, &peer_name, Some(peer_ip.to_string()));
-        config.save(&paths.config_file)?;
-        println!("Paired with \"{saved_as}\". A running `crosscopy run` picks this up automatically.");
+        let saved_as = pair::save(paths, peer_id, &peer_name, peer_ip)?;
+        println!("Paired with \"{saved_as}\". A running crosscopy picks this up automatically.");
         Ok(())
     })
 }
@@ -260,13 +153,12 @@ async fn ask(prompt: &str) -> Result<bool> {
 fn show_id(paths: &Paths) -> Result<()> {
     let config = Config::load(&paths.config_file)?;
     let identity = Identity::load_or_create(&paths.identity_dir)?;
-    let addresses = crosscopy_net::local_addresses();
-    let shown: Vec<String> = addresses.iter().map(ToString::to_string).collect();
+    let addresses: Vec<String> = crosscopy_net::local_addresses().iter().map(ToString::to_string).collect();
 
     println!("Name:        {}", config.device_name());
     println!("Device code: {}", identity.id);
     println!("UDP port:    {}", config.port);
-    println!("Addresses:   {}", if shown.is_empty() { "(none found)".to_owned() } else { shown.join(", ") });
+    println!("Addresses:   {}", if addresses.is_empty() { "(none found)".to_owned() } else { addresses.join(", ") });
     println!("Config:      {}", paths.config_file.display());
     println!();
     println!("To pair, run `crosscopy pair` on both devices.");
@@ -301,9 +193,7 @@ fn peer(paths: &Paths, cmd: PeerCommand) -> Result<()> {
             }
         }
         PeerCommand::Remove { name } => {
-            let before = config.peers.len();
-            config.peers.retain(|p| p.name != name);
-            if config.peers.len() == before {
+            if !config.remove_peer(&name) {
                 bail!("no peer named {name:?}");
             }
             config.save(&paths.config_file)?;

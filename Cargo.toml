@@ -8,6 +8,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+crosscopy = { path = "crates/crosscopy" }
 crosscopy-core = { path = "crates/crosscopy-core" }
 crosscopy-clipboard = { path = "crates/crosscopy-clipboard" }
 crosscopy-net = { path = "crates/crosscopy-net" }

@@ -1,0 +1,27 @@
+[package]
+name = "crosscopy-tray"
+description = "CrossCopy tray app: runs clipboard sync in the background"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+auto-launch = "0.6.0"
+crosscopy.workspace = true
+crosscopy-net.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+rfd = "0.17.2"
+tao = "0.37.1"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tray-icon = "0.26.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[build-dependencies]
+ico = "0.5.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+winresource = "0.1.31"

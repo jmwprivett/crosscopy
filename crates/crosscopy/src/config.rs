@@ -8,17 +8,29 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PORT: u16 = 47800;
 
+#[derive(Debug, Clone)]
 pub struct Paths {
     pub config_file: PathBuf,
     pub identity_dir: PathBuf,
+    /// Where the tray app writes its log (it has no console).
+    pub log_file: PathBuf,
 }
 
 impl Paths {
-    pub fn new() -> Result<Self> {
+    /// The per-user default locations, or everything under `dir` if given.
+    pub fn new(dir: Option<PathBuf>) -> Result<Self> {
+        if let Some(dir) = dir {
+            return Ok(Self {
+                config_file: dir.join("config.toml"),
+                identity_dir: dir.join("identity"),
+                log_file: dir.join("crosscopy.log"),
+            });
+        }
         let dirs = ProjectDirs::from("", "", "crosscopy").context("could not locate home directory")?;
         Ok(Self {
             config_file: dirs.config_dir().join("config.toml"),
             identity_dir: dirs.config_dir().join("identity"),
+            log_file: dirs.data_local_dir().join("crosscopy.log"),
         })
     }
 }
@@ -81,6 +93,13 @@ impl Config {
             // macOS reports e.g. "pinkbook.local"; keep just the machine name.
             host.split('.').next().filter(|s| !s.is_empty()).unwrap_or("device").to_owned()
         })
+    }
+
+    /// Removes the peer with this name; returns whether it existed.
+    pub fn remove_peer(&mut self, name: &str) -> bool {
+        let before = self.peers.len();
+        self.peers.retain(|p| p.name != name);
+        self.peers.len() != before
     }
 
     pub fn peers(&self) -> Result<Vec<Peer>> {
