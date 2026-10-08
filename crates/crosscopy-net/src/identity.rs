@@ -15,6 +15,12 @@ pub struct Identity {
     key: PrivatePkcs8KeyDer<'static>,
 }
 
+impl Clone for Identity {
+    fn clone(&self) -> Self {
+        Self { id: self.id, cert: self.cert.clone(), key: self.key.clone_key() }
+    }
+}
+
 impl Identity {
     /// Loads the identity from `dir`, generating and saving one on first use.
     pub fn load_or_create(dir: &Path) -> Result<Self> {

@@ -12,7 +12,7 @@ crosscopy-clipboard.workspace = true
 crosscopy-core.workspace = true
 crosscopy-net.workspace = true
 directories = "6.0.0"
-if-addrs = "0.15.0"
+gethostname = "1.1.0"
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "signal"] }
 toml = "1.1.7"
