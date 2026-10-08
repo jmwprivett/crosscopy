@@ -42,8 +42,19 @@ pub struct Config {
     /// Name shown to other devices; defaults to the hostname.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
+    /// Tray icon color on Linux, where the bar's theme can't be detected.
+    /// Defaults to white, which suits the usual dark Waybar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tray_icon: Option<IconColor>,
     #[serde(default, rename = "peer")]
     pub peers: Vec<PeerConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IconColor {
+    White,
+    Black,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +74,7 @@ fn default_port() -> u16 {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { port: DEFAULT_PORT, device_name: None, peers: Vec::new() }
+        Self { port: DEFAULT_PORT, device_name: None, tray_icon: None, peers: Vec::new() }
     }
 }
 
@@ -178,6 +189,13 @@ mod tests {
         let text = "port = 47800\n[[peer]]\nname = \"pinkbook\"\naddress = \"192.168.1.5\"\ncode = \"TFYR-UJ4U-X725-CEIQ-RRND-YGDR-XJVT-353D\"\n";
         let config: Config = toml::from_str(text).unwrap();
         assert_eq!(config.peers().unwrap()[0].address.as_deref(), Some("192.168.1.5:47800"));
+    }
+
+    #[test]
+    fn tray_icon_color_parses() {
+        let config: Config = toml::from_str("tray_icon = \"black\"").unwrap();
+        assert_eq!(config.tray_icon, Some(IconColor::Black));
+        assert!(toml::from_str::<Config>("tray_icon = \"purple\"").is_err());
     }
 
     #[test]

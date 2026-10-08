@@ -29,6 +29,7 @@ pub fn watch() -> Result<Receiver<ClipboardChanged>> {
     Ok(rx)
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn is_excluded() -> bool {
     // TODO: honor KDE's `x-kde-passwordManagerHint` once on a native backend.
     false

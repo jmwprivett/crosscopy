@@ -5,7 +5,8 @@
 //!
 //! - Windows: `AddClipboardFormatListener` (push, no polling)
 //! - macOS: poll `NSPasteboard.changeCount` (the OS offers no notification)
-//! - Other: poll the text contents (temporary, until X11/Wayland backends land)
+//! - Linux on wlroots Wayland (Hyprland, Sway): `wlr-data-control` (push)
+//! - Anything else: poll the text contents
 
 use std::sync::mpsc::Receiver;
 
@@ -13,15 +14,37 @@ use std::sync::mpsc::Receiver;
 mod macos;
 #[cfg(not(any(windows, target_os = "macos")))]
 mod poll;
+#[cfg(target_os = "linux")]
+mod wayland;
 #[cfg(windows)]
 mod windows;
 
 #[cfg(target_os = "macos")]
 use macos as platform;
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 use poll as platform;
 #[cfg(windows)]
 use windows as platform;
+
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::{ClipboardChanged, Result, poll, wayland};
+    use std::sync::mpsc::Receiver;
+
+    pub fn watch() -> Result<Receiver<ClipboardChanged>> {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            match wayland::watch() {
+                Ok(rx) => return Ok(rx),
+                Err(e) => tracing::warn!("{e}; falling back to polling the clipboard"),
+            }
+        }
+        poll::watch()
+    }
+
+    pub fn is_excluded() -> bool {
+        wayland::is_excluded()
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

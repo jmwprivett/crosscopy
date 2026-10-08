@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CrossCopy
+Comment=Sync your clipboard with your other devices
+Exec=@BIN@/crosscopy-tray
+Icon=crosscopy
+Terminal=false
+Categories=Utility;

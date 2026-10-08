@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,3 +12,4 @@ crosscopy = { path = "crates/crosscopy" }
 crosscopy-core = { path = "crates/crosscopy-core" }
 crosscopy-clipboard = { path = "crates/crosscopy-clipboard" }
 crosscopy-net = { path = "crates/crosscopy-net" }
+crosscopy-update = { path = "crates/crosscopy-update" }

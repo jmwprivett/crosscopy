@@ -10,14 +10,15 @@ mod icons;
 mod theme;
 
 use anyhow::{Context, Result, bail};
-use crosscopy::config::{Config, Paths};
+use crosscopy::config::{Config, IconColor, Paths};
 use crosscopy::daemon::{self, Control, SharedStatus, Status};
 use crosscopy::pair;
 use crosscopy_net::Identity;
+use crosscopy_update::Update;
 use rfd::{AsyncMessageDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -30,14 +31,28 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, Predefin
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
 const TITLE: &str = "CrossCopy";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// How often the menu and icon are refreshed from the daemon's status.
 const REFRESH: Duration = Duration::from_secs(1);
 /// Logs larger than this are rotated at startup.
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+const FIRST_UPDATE_CHECK: Duration = Duration::from_secs(10);
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 enum UserEvent {
     Menu(MenuEvent),
     PairingFinished,
+    UpdateChecked { manual: bool, result: Result<Option<Update>, String> },
+    UpdateDownloaded(Result<PathBuf, String>),
+}
+
+enum UpdateState {
+    /// Development build: never updates itself.
+    Disabled,
+    Idle,
+    Checking,
+    Available(Update),
+    Downloading,
 }
 
 fn main() {
@@ -107,6 +122,14 @@ fn run() -> Result<()> {
                 app.pairing = false;
                 app.refresh();
             }
+            Event::UserEvent(UserEvent::UpdateChecked { manual, result }) => {
+                app.on_update_checked(manual, result);
+            }
+            Event::UserEvent(UserEvent::UpdateDownloaded(result)) => {
+                if app.on_update_downloaded(result) {
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
             _ => {}
         }
     })
@@ -118,6 +141,7 @@ struct Items {
     pair: MenuItem,
     devices: Submenu,
     autostart: CheckMenuItem,
+    update: MenuItem,
     open_log: MenuItem,
     quit: MenuItem,
 }
@@ -138,6 +162,10 @@ struct App {
     icon_state: Option<(bool, bool)>,
     unpair_items: HashMap<MenuId, String>,
     pairing: bool,
+    update: UpdateState,
+    next_update_check: Instant,
+    /// `tray_icon` from config, read at startup.
+    icon_color: Option<IconColor>,
 }
 
 impl App {
@@ -155,6 +183,7 @@ impl App {
             pair: MenuItem::new("Pair new device…", true, None),
             devices: Submenu::new("Paired devices", true),
             autostart: CheckMenuItem::new("Start at login", true, autostart::is_enabled(), None),
+            update: MenuItem::new("", false, None),
             open_log: MenuItem::new("Open log", true, None),
             quit: MenuItem::new("Quit CrossCopy", true, None),
         };
@@ -167,12 +196,12 @@ impl App {
             &items.devices,
             &PredefinedMenuItem::separator(),
             &items.autostart,
+            &items.update,
             &items.open_log,
             &PredefinedMenuItem::separator(),
             &items.quit,
         ])?;
         Ok(Self {
-            paths,
             runtime,
             status,
             control,
@@ -185,12 +214,16 @@ impl App {
             icon_state: None,
             unpair_items: HashMap::new(),
             pairing: false,
+            update: if crosscopy_update::enabled() { UpdateState::Idle } else { UpdateState::Disabled },
+            next_update_check: Instant::now() + FIRST_UPDATE_CHECK,
+            icon_color: Config::load(&paths.config_file).ok().and_then(|c| c.tray_icon),
+            paths,
         })
     }
 
     fn create_tray(&mut self) -> Result<()> {
         let menu = self.menu.take().context("tray already created")?;
-        let black = wants_black_glyph();
+        let black = wants_black_glyph(self.icon_color);
         let icon = icons::tray(black, false);
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -243,12 +276,21 @@ impl App {
         self.items.status.set_text(&text);
         self.items.pair.set_enabled(!self.pairing);
 
+        if matches!(self.update, UpdateState::Idle) && Instant::now() >= self.next_update_check {
+            self.next_update_check = Instant::now() + UPDATE_CHECK_INTERVAL;
+            self.start_update_check(false);
+        }
+        self.refresh_update_item();
+        if matches!(self.update, UpdateState::Available(_)) {
+            text = format!("{text} · Update available");
+        }
+
         if self.shown.as_ref().is_none_or(|s| s.paired != status.paired || s.connected != status.connected) {
             self.rebuild_devices(&status);
         }
         if let Some(tray) = &self.tray {
             let _ = tray.set_tooltip(Some(format!("{TITLE} — {text}")));
-            let state = (wants_black_glyph(), status.paused);
+            let state = (wants_black_glyph(self.icon_color), status.paused);
             if self.icon_state != Some(state) {
                 let icon = Some(icons::tray(state.0, state.1));
                 #[cfg(target_os = "macos")]
@@ -294,6 +336,8 @@ impl App {
                 self.items.autostart.set_checked(!enabled);
                 error_dialog(&format!("{e:#}"));
             }
+        } else if id == self.items.update.id() {
+            self.on_update_clicked();
         } else if id == self.items.open_log.id() {
             open_file(&self.paths.log_file);
         } else if id == self.items.quit.id() {
@@ -353,6 +397,98 @@ impl App {
         }
     }
 
+    fn refresh_update_item(&self) {
+        let (text, enabled) = match &self.update {
+            UpdateState::Disabled => (format!("CrossCopy {VERSION} (development build)"), false),
+            UpdateState::Idle => (format!("Check for updates (v{VERSION})"), true),
+            UpdateState::Checking => ("Checking for updates…".to_owned(), false),
+            UpdateState::Available(update) => (format!("Install update v{}…", update.version), true),
+            UpdateState::Downloading => ("Downloading update…".to_owned(), false),
+        };
+        self.items.update.set_text(text);
+        self.items.update.set_enabled(enabled);
+    }
+
+    fn start_update_check(&mut self, manual: bool) {
+        self.update = UpdateState::Checking;
+        self.refresh_update_item();
+        let proxy = self.proxy.clone();
+        self.runtime.spawn_blocking(move || {
+            let result = crosscopy_update::check(VERSION).map_err(|e| format!("{e:#}"));
+            let _ = proxy.send_event(UserEvent::UpdateChecked { manual, result });
+        });
+    }
+
+    fn on_update_checked(&mut self, manual: bool, result: Result<Option<Update>, String>) {
+        self.update = UpdateState::Idle;
+        match result {
+            Ok(Some(update)) => {
+                info!(version = %update.version, "update available");
+                self.update = UpdateState::Available(update);
+            }
+            Ok(None) if manual => info_dialog(&format!("CrossCopy {VERSION} is up to date.")),
+            Ok(None) => {}
+            Err(e) => {
+                warn!("update check failed: {e}");
+                if manual {
+                    error_dialog(&format!("Couldn't check for updates.\n\n{e}"));
+                }
+            }
+        }
+        self.refresh();
+    }
+
+    fn on_update_clicked(&mut self) {
+        match &self.update {
+            UpdateState::Idle => self.start_update_check(true),
+            UpdateState::Available(update) => {
+                let notes = if update.notes.is_empty() { String::new() } else { format!("\n\n{}", update.notes) };
+                let confirmed = MessageDialog::new()
+                    .set_level(MessageLevel::Info)
+                    .set_title(TITLE)
+                    .set_description(format!(
+                        "Update CrossCopy from {VERSION} to {}?{notes}\n\nCrossCopy will restart.",
+                        update.version
+                    ))
+                    .set_buttons(MessageButtons::YesNo)
+                    .show();
+                if confirmed != MessageDialogResult::Yes {
+                    return;
+                }
+                let update = update.clone();
+                self.update = UpdateState::Downloading;
+                self.refresh_update_item();
+                let proxy = self.proxy.clone();
+                self.runtime.spawn_blocking(move || {
+                    let dir = std::env::temp_dir().join("crosscopy-update");
+                    let result = crosscopy_update::download(&update, &dir).map_err(|e| format!("{e:#}"));
+                    let _ = proxy.send_event(UserEvent::UpdateDownloaded(result));
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Installs a downloaded update; returns true when the app should exit
+    /// so the new version can start.
+    fn on_update_downloaded(&mut self, result: Result<PathBuf, String>) -> bool {
+        let installed = result.and_then(|path| crosscopy_update::install(&path).map_err(|e| format!("{e:#}")));
+        match installed {
+            Ok(()) => {
+                info!("update installed; restarting");
+                self.quit();
+                true
+            }
+            Err(e) => {
+                error!("update failed: {e}");
+                error_dialog(&format!("The update couldn't be installed.\n\n{e}"));
+                self.update = UpdateState::Idle;
+                self.refresh();
+                false
+            }
+        }
+    }
+
     fn quit(&mut self) {
         info!("quitting");
         let _ = self.control.send(Control::Shutdown);
@@ -392,12 +528,19 @@ async fn pair_flow(paths: &Paths, control: &UnboundedSender<Control>) -> Result<
 }
 
 /// On macOS the icon is a template image that the system tints; Windows
-/// needs the right color for the taskbar theme.
-fn wants_black_glyph() -> bool {
+/// follows the taskbar theme; on Linux (Waybar etc.) the bar's colors can't
+/// be detected, so it's white unless config says `tray_icon = "black"`.
+fn wants_black_glyph(linux_color: Option<IconColor>) -> bool {
+    #[cfg(windows)]
+    let _ = linux_color;
     #[cfg(windows)]
     return theme::taskbar_is_light();
-    #[cfg(not(windows))]
-    true
+    #[cfg(target_os = "macos")]
+    let _ = linux_color;
+    #[cfg(target_os = "macos")]
+    return true;
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return linux_color == Some(IconColor::Black);
 }
 
 async fn dialog(level: MessageLevel, message: &str) {
@@ -408,6 +551,15 @@ async fn dialog(level: MessageLevel, message: &str) {
         .set_buttons(MessageButtons::Ok)
         .show()
         .await;
+}
+
+fn info_dialog(message: &str) {
+    MessageDialog::new()
+        .set_level(MessageLevel::Info)
+        .set_title(TITLE)
+        .set_description(message)
+        .set_buttons(MessageButtons::Ok)
+        .show();
 }
 
 fn error_dialog(message: &str) {

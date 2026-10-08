@@ -10,6 +10,7 @@ anyhow = "1.0.104"
 auto-launch = "0.6.0"
 crosscopy.workspace = true
 crosscopy-net.workspace = true
+crosscopy-update.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 rfd = "0.17.2"
 tao = "0.37.1"
