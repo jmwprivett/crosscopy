@@ -1,0 +1,18 @@
+[package]
+name = "crosscopy-net"
+description = "Encrypted peer-to-peer transport for crosscopy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+crosscopy-core.workspace = true
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "logging"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tempfile = "3.27.0"
