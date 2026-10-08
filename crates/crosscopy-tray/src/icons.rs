@@ -13,12 +13,24 @@ const SIZE: u32 = 32;
 #[cfg(not(windows))]
 const SIZE: u32 = 64;
 
+/// Fraction of the icon the glyph fills. macOS scales the image to the full
+/// menu bar icon height, and an edge-to-edge glyph looks oversized next to
+/// the system icons, so pad it there.
+#[cfg(target_os = "macos")]
+const GLYPH_SCALE: f32 = 0.75;
+#[cfg(not(target_os = "macos"))]
+const GLYPH_SCALE: f32 = 1.0;
+
 pub fn tray(black: bool, paused: bool) -> Icon {
     let bytes = if black { BLACK } else { WHITE };
-    let mut image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+    let glyph_size = (SIZE as f32 * GLYPH_SCALE).round() as u32;
+    let glyph = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
         .expect("bundled icon is a valid PNG")
-        .resize_exact(SIZE, SIZE, FilterType::Lanczos3)
+        .resize_exact(glyph_size, glyph_size, FilterType::Lanczos3)
         .to_rgba8();
+    let mut image = image::RgbaImage::new(SIZE, SIZE);
+    let offset = i64::from((SIZE - glyph_size) / 2);
+    image::imageops::overlay(&mut image, &glyph, offset, offset);
     if paused {
         // Fade the icon so pausing is visible at a glance.
         for pixel in image.pixels_mut() {
