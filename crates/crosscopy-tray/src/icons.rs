@@ -21,6 +21,13 @@ const GLYPH_SCALE: f32 = 0.75;
 #[cfg(not(target_os = "macos"))]
 const GLYPH_SCALE: f32 = 1.0;
 
+/// Pixels to shift the glyph up from center, to sit level with the other
+/// menu bar icons.
+#[cfg(target_os = "macos")]
+const GLYPH_LIFT: i64 = 2;
+#[cfg(not(target_os = "macos"))]
+const GLYPH_LIFT: i64 = 0;
+
 pub fn tray(black: bool, paused: bool) -> Icon {
     let bytes = if black { BLACK } else { WHITE };
     let glyph_size = (SIZE as f32 * GLYPH_SCALE).round() as u32;
@@ -30,7 +37,7 @@ pub fn tray(black: bool, paused: bool) -> Icon {
         .to_rgba8();
     let mut image = image::RgbaImage::new(SIZE, SIZE);
     let offset = i64::from((SIZE - glyph_size) / 2);
-    image::imageops::overlay(&mut image, &glyph, offset, offset);
+    image::imageops::overlay(&mut image, &glyph, offset, offset - GLYPH_LIFT);
     if paused {
         // Fade the icon so pausing is visible at a glance.
         for pixel in image.pixels_mut() {
