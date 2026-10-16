@@ -267,6 +267,8 @@ impl App {
             "No devices paired yet".to_owned()
         } else if status.connected.is_empty() {
             format!("Waiting for {}", status.paired.join(", "))
+        } else if let Some(transfer) = &status.transfer {
+            transfer.clone()
         } else {
             format!("Connected to {}", status.connected.join(", "))
         };

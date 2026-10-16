@@ -13,6 +13,7 @@ mod identity;
 mod node;
 pub mod pairing;
 mod tls;
+mod transfer;
 
 pub use addr::local_addresses;
 pub use identity::Identity;

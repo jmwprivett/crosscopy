@@ -12,13 +12,23 @@ use uuid::Uuid;
 /// Well-known MIME types used for clipboard payloads.
 pub mod mime {
     pub const TEXT_PLAIN: &str = "text/plain;charset=utf-8";
+    pub const TEXT_HTML: &str = "text/html";
+    pub const TEXT_RTF: &str = "text/rtf";
+    pub const IMAGE_PNG: &str = "image/png";
+    /// A postcard-encoded [`FileManifest`](crate::FileManifest). The file
+    /// contents are fetched from the origin device separately.
+    pub const FILES: &str = "application/x-crosscopy-files";
 }
 
 /// QUIC ALPN identifier; bump the suffix on incompatible protocol changes.
 pub const ALPN: &[u8] = b"crosscopy/1";
 
-/// Upper bound on a single encoded message.
-pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Upper bound on a single encoded message. Large enough for a screenshot
+/// of a 6K display.
+pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
+mod files;
+pub use files::{EntryKind, FileEntry, FileManifest, format_bytes, safe_relative_path};
 
 /// A device's identity: 160 bits of the BLAKE3 hash of its TLS certificate.
 ///
@@ -149,10 +159,40 @@ impl ClipItem {
     }
 
     pub fn text(&self) -> Option<&str> {
-        self.formats
+        self.format(mime::TEXT_PLAIN).and_then(|data| std::str::from_utf8(data).ok())
+    }
+
+    pub fn format(&self, mime: &str) -> Option<&[u8]> {
+        self.formats.iter().find(|f| f.mime == mime).map(|f| f.data.as_slice())
+    }
+
+    /// The file manifest, if this clip is a file copy.
+    pub fn files(&self) -> Option<FileManifest> {
+        self.format(mime::FILES).and_then(|data| FileManifest::decode(data).ok())
+    }
+
+    /// Total payload size, for logs and limits.
+    pub fn size(&self) -> usize {
+        self.formats.iter().map(|f| f.data.len()).sum()
+    }
+
+    /// Short human description such as "text + html" or "3 files".
+    pub fn describe(&self) -> String {
+        if let Some(files) = self.files() {
+            return files.describe();
+        }
+        let names: Vec<&str> = self
+            .formats
             .iter()
-            .find(|f| f.mime == mime::TEXT_PLAIN)
-            .and_then(|f| std::str::from_utf8(&f.data).ok())
+            .map(|f| match f.mime.as_str() {
+                mime::TEXT_PLAIN => "text",
+                mime::TEXT_HTML => "html",
+                mime::TEXT_RTF => "rtf",
+                mime::IMAGE_PNG => "image",
+                other => other,
+            })
+            .collect();
+        names.join(" + ")
     }
 }
 

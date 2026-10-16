@@ -1,15 +1,22 @@
 //! Native clipboard access and change notification.
 //!
-//! Reading and writing goes through `arboard`. Change detection is
+//! Every backend reads and writes the same set of representations
+//! ([`Contents`]) using the OS's own clipboard API, so a single copy can carry
+//! plain text, HTML, RTF, an image and files at once. Change detection is
 //! platform-specific because no portable API exists:
 //!
 //! - Windows: `AddClipboardFormatListener` (push, no polling)
 //! - macOS: poll `NSPasteboard.changeCount` (the OS offers no notification)
 //! - Linux on wlroots Wayland (Hyprland, Sway): `wlr-data-control` (push)
-//! - Anything else: poll the text contents
+//! - Anything else: poll the text contents (text only)
 
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
+#[cfg(windows)]
+mod dib;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -19,6 +26,8 @@ mod wayland;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(target_os = "linux")]
+use linux as platform;
 #[cfg(target_os = "macos")]
 use macos as platform;
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
@@ -26,37 +35,48 @@ use poll as platform;
 #[cfg(windows)]
 use windows as platform;
 
-#[cfg(target_os = "linux")]
-mod platform {
-    use super::{ClipboardChanged, Result, poll, wayland};
-    use std::sync::mpsc::Receiver;
-
-    pub fn watch() -> Result<Receiver<ClipboardChanged>> {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            match wayland::watch() {
-                Ok(rx) => return Ok(rx),
-                Err(e) => tracing::warn!("{e}; falling back to polling the clipboard"),
-            }
-        }
-        poll::watch()
-    }
-
-    pub fn is_excluded() -> bool {
-        wayland::is_excluded()
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("clipboard error: {0}")]
-    Clipboard(#[from] arboard::Error),
+    Clipboard(String),
     #[error("os error: {0}")]
     Os(#[from] std::io::Error),
+    #[error("the clipboard is in use by another app")]
+    Busy,
     #[error("clipboard watcher thread exited during startup")]
     WatcherDied,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// What's on the clipboard, in every representation crosscopy syncs.
+///
+/// Text is always LF-normalized here; backends convert to and from the
+/// platform's line endings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Contents {
+    pub text: Option<String>,
+    pub html: Option<String>,
+    pub rtf: Option<Vec<u8>>,
+    pub png: Option<Vec<u8>>,
+    /// Copied files and folders. When set, backends write only these.
+    pub files: Vec<PathBuf>,
+}
+
+impl Contents {
+    pub fn text(text: &str) -> Self {
+        Self { text: Some(text.to_owned()), ..Self::default() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none() && self.html.is_none() && self.rtf.is_none() && self.png.is_none() && self.files.is_empty()
+    }
+}
+
+/// Canonical text form is LF; each platform converts on write.
+pub(crate) fn normalize_newlines(text: String) -> String {
+    if text.contains('\r') { text.replace("\r\n", "\n") } else { text }
+}
 
 /// Signal that the system clipboard changed. Read it to see what changed.
 #[derive(Debug, Clone, Copy)]
@@ -77,28 +97,28 @@ pub fn is_excluded() -> bool {
     platform::is_excluded()
 }
 
-/// Thin wrapper over `arboard` that handles platform text conventions.
-pub struct Clipboard(arboard::Clipboard);
+pub struct Clipboard(platform::Backend);
 
 impl Clipboard {
     pub fn new() -> Result<Self> {
-        Ok(Self(arboard::Clipboard::new()?))
+        Ok(Self(platform::Backend::new()?))
     }
 
-    /// Returns `None` when the clipboard holds no text (e.g. only an image).
-    pub fn read_text(&mut self) -> Result<Option<String>> {
-        match self.0.get_text() {
-            Ok(text) => Ok(Some(text)),
-            Err(arboard::Error::ContentNotAvailable) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+    /// Reads every supported representation. Formats that fail to read are
+    /// left out rather than failing the whole read.
+    pub fn read(&mut self) -> Result<Contents> {
+        self.0.read()
     }
 
-    /// Writes LF-normalized text, converting to the platform's line endings.
+    /// Replaces the clipboard with `contents`.
+    ///
+    /// Returns what [`read`](Self::read) will now report, which can differ
+    /// from `contents` when the OS converts or adds representations.
+    pub fn write(&mut self, contents: &Contents) -> Result<Contents> {
+        self.0.write(contents)
+    }
+
     pub fn write_text(&mut self, text: &str) -> Result<()> {
-        #[cfg(windows)]
-        let text = text.replace('\n', "\r\n");
-        self.0.set_text(text)?;
-        Ok(())
+        self.write(&Contents::text(text)).map(drop)
     }
 }

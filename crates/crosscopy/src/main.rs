@@ -205,14 +205,16 @@ fn peer(paths: &Paths, cmd: PeerCommand) -> Result<()> {
 
 fn watch(paths: &Paths) -> Result<()> {
     let identity = Identity::load_or_create(&paths.identity_dir)?;
+    let config = Config::load(&paths.config_file)?;
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-    let _clipboard = clipboard::spawn(identity.id, tx).context("starting clipboard")?;
+    let _clipboard = clipboard::spawn(identity.id, config.max_file_bytes(), tx).context("starting clipboard")?;
     info!("watching clipboard (Ctrl+C to stop)");
-    while let Some(item) = rx.blocking_recv() {
+    while let Some(clipboard::LocalClip { item, .. }) = rx.blocking_recv() {
         info!(
             hash = %item.hash.short(),
-            bytes = item.formats[0].data.len(),
-            "text: {}",
+            size = crosscopy_core::format_bytes(item.size() as u64),
+            "{}: {}",
+            item.describe(),
             preview(item.text().unwrap_or_default()),
         );
     }

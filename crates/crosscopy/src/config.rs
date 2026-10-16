@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PORT: u16 = 47800;
+pub const DEFAULT_MAX_FILE_MB: u64 = 500;
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -14,6 +15,8 @@ pub struct Paths {
     pub identity_dir: PathBuf,
     /// Where the tray app writes its log (it has no console).
     pub log_file: PathBuf,
+    /// Where files copied on other devices are downloaded.
+    pub received_dir: PathBuf,
 }
 
 impl Paths {
@@ -24,6 +27,7 @@ impl Paths {
                 config_file: dir.join("config.toml"),
                 identity_dir: dir.join("identity"),
                 log_file: dir.join("crosscopy.log"),
+                received_dir: dir.join("received"),
             });
         }
         let dirs = ProjectDirs::from("", "", "crosscopy").context("could not locate home directory")?;
@@ -31,6 +35,7 @@ impl Paths {
             config_file: dirs.config_dir().join("config.toml"),
             identity_dir: dirs.config_dir().join("identity"),
             log_file: dirs.data_local_dir().join("crosscopy.log"),
+            received_dir: dirs.cache_dir().join("received"),
         })
     }
 }
@@ -46,6 +51,10 @@ pub struct Config {
     /// Defaults to white, which suits the usual dark Waybar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tray_icon: Option<IconColor>,
+    /// Largest file copy, in megabytes, that is sent or received. 0 turns
+    /// file sync off.
+    #[serde(default = "default_max_file_mb")]
+    pub max_file_mb: u64,
     #[serde(default, rename = "peer")]
     pub peers: Vec<PeerConfig>,
 }
@@ -72,9 +81,19 @@ fn default_port() -> u16 {
     DEFAULT_PORT
 }
 
+fn default_max_file_mb() -> u64 {
+    DEFAULT_MAX_FILE_MB
+}
+
 impl Default for Config {
     fn default() -> Self {
-        Self { port: DEFAULT_PORT, device_name: None, tray_icon: None, peers: Vec::new() }
+        Self {
+            port: DEFAULT_PORT,
+            device_name: None,
+            tray_icon: None,
+            max_file_mb: DEFAULT_MAX_FILE_MB,
+            peers: Vec::new(),
+        }
     }
 }
 
@@ -104,6 +123,10 @@ impl Config {
             // macOS reports e.g. "pinkbook.local"; keep just the machine name.
             host.split('.').next().filter(|s| !s.is_empty()).unwrap_or("device").to_owned()
         })
+    }
+
+    pub fn max_file_bytes(&self) -> u64 {
+        self.max_file_mb.saturating_mul(1_000_000)
     }
 
     /// Removes the peer with this name; returns whether it existed.
@@ -189,6 +212,7 @@ mod tests {
         let text = "port = 47800\n[[peer]]\nname = \"pinkbook\"\naddress = \"192.168.1.5\"\ncode = \"TFYR-UJ4U-X725-CEIQ-RRND-YGDR-XJVT-353D\"\n";
         let config: Config = toml::from_str(text).unwrap();
         assert_eq!(config.peers().unwrap()[0].address.as_deref(), Some("192.168.1.5:47800"));
+        assert_eq!(config.max_file_mb, DEFAULT_MAX_FILE_MB);
     }
 
     #[test]

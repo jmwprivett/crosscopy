@@ -3,4 +3,5 @@
 pub mod clipboard;
 pub mod config;
 pub mod daemon;
+pub mod files;
 pub mod pair;

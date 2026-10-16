@@ -29,6 +29,20 @@ CrossCopy lives in the Windows tray, macOS menu bar, or Waybar tray. From its me
 
 Devices find each other over mDNS, so IP addresses don't matter and can change.
 
+What syncs:
+
+- **Text**, plus **rich text** (HTML and RTF) when the app you copied from provides it, so
+  formatting survives pasting into Word, Pages, Notes, Mail, etc.
+- **Images** (screenshots, "Copy image" in a browser, Paint, Preview, ...), sent as PNG.
+- **Files and folders** copied in Explorer, Finder or a Linux file manager. They are downloaded
+  in the background to a cache folder on the other device, then put on its clipboard, so
+  pasting is instant once the download finishes. The tray shows progress for large copies.
+  Copies over 500 MB are skipped; change this with `max_file_mb` in the config file (`0` turns
+  file sync off). Only the latest download is kept.
+
+On Linux, everything except text needs a compositor with `wlr-data-control` (Hyprland, Sway);
+elsewhere only text syncs.
+
 The `crosscopy` command-line tool (installed alongside, or `cargo run --release -- <command>`)
 does the same things: `run` (daemon in the foreground), `pair` (on both devices), `id`,
 `peer list`, `peer remove <name>`, `peer add <name> <address> <code>` (manual pairing),
@@ -40,6 +54,9 @@ does the same things: `run` (daemon in the foreground), `pair` (on both devices)
 cargo run --release -p crosscopy-tray   # tray app
 cargo run --release -- <command>        # CLI
 cargo test --workspace
+# Round-trips through the real clipboard (replaces its contents):
+cargo test -p crosscopy-clipboard --test system -- --ignored --test-threads=1
+cargo run -p crosscopy-clipboard --example dump   # show what crosscopy reads right now
 ```
 
 Development builds never update themselves; only release builds (with `CROSSCOPY_UPDATES=1`
@@ -77,10 +94,19 @@ Secrets live in a `release` environment (Settings → Environments) restricted t
   `ExcludeClipboardContentFromMonitorProcessing`, `CanUploadToCloudClipboard=0`, etc. on Windows,
   `org.nspasteboard.ConcealedType` / `TransientType` on macOS, `x-kde-passwordManagerHint` on
   Linux.
-- **Wire format is OS-neutral:** payloads are keyed by MIME type, and text is LF-normalized
-  (converted to CRLF on write on Windows).
-- **Dedup / echo suppression** uses BLAKE3 content hashes. A single thread owns the clipboard and
-  tracks the hash of what is on it, so a clip written from a peer is not sent back out.
+- **Wire format is OS-neutral:** payloads are keyed by MIME type (`text/plain`, `text/html`,
+  `text/rtf`, `image/png`), and text is LF-normalized (converted to CRLF on write on Windows).
+  Each backend converts to native formats on write: `CF_HTML`, PNG plus `CF_DIBV5` and
+  `CF_HDROP` on Windows; PNG plus TIFF and file URLs on macOS; `text/uri-list` and
+  `x-special/gnome-copied-files` on Linux. All formats of one copy are written in one update.
+- **Files** travel as a manifest (relative paths, sizes, times) inside the clip. The receiver
+  then fetches the contents from the copying device over a separate stream of the same
+  connection, so a big transfer never holds up text. Only files that were actually offered can be
+  fetched, and every received path is checked so it can't escape the download folder. A newer
+  copy on either side cancels a download in progress.
+- **Dedup / echo suppression** uses BLAKE3 fingerprints. A single thread owns the clipboard and
+  tracks the fingerprint of what is on it (as read back after writing), so a clip written from a
+  peer is not sent back out.
 - **Trust is pinned, not networked.** A device's code is a hash of its self-signed certificate.
   Both sides of every QUIC connection must present a pinned certificate (mutual TLS 1.3, no
   session resumption, so every connection re-checks the pin). After verifying, the accepting side
@@ -108,5 +134,6 @@ Secrets live in a `release` environment (Settings → Environments) restricted t
 3. [x] mDNS discovery, pairing with confirmation codes, live config reload
 4. [x] Tray icon, autostart, pause/resume
 5. [x] Installers, signed auto-updates, Linux on Hyprland
-6. [ ] Images, HTML, RTF
-7. [ ] Files (eager transfer to a cache first, then lazy/promised files)
+6. [x] Images, HTML, RTF
+7. [x] Files (eager transfer to a cache folder)
+8. [ ] Lazy files: download only on paste

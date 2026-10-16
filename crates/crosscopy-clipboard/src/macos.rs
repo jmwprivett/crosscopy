@@ -1,10 +1,17 @@
 //! macOS backend. AppKit has no clipboard-change notification, so we poll
 //! `changeCount`, which is a cheap integer read. Every Mac clipboard tool
-//! works this way.
+//! works this way. Contents go through `NSPasteboard` directly.
 
-use crate::{ClipboardChanged, Result};
-use objc2::rc::autoreleasepool;
-use objc2_app_kit::NSPasteboard;
+use crate::{ClipboardChanged, Contents, Error, Result, normalize_newlines};
+use objc2::rc::{Retained, autoreleasepool};
+use objc2::runtime::ProtocolObject;
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardItem, NSPasteboardType,
+    NSPasteboardTypeFileURL, NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeRTF,
+    NSPasteboardTypeString, NSPasteboardTypeTIFF, NSPasteboardWriting,
+};
+use objc2_foundation::{NSArray, NSData, NSDictionary, NSString, NSURL};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
@@ -54,4 +61,113 @@ pub fn is_excluded() -> bool {
             .iter()
             .any(|t| EXCLUDED_TYPES.contains(&t.to_string().as_str()))
     })
+}
+
+pub struct Backend;
+
+impl Backend {
+    pub fn new() -> Result<Self> {
+        Ok(Self)
+    }
+
+    pub fn read(&mut self) -> Result<Contents> {
+        Ok(autoreleasepool(|_| read_general()))
+    }
+
+    pub fn write(&mut self, contents: &Contents) -> Result<Contents> {
+        autoreleasepool(|_| write_general(contents))?;
+        self.read()
+    }
+}
+
+fn read_general() -> Contents {
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let (string, html, rtf, png, tiff) = unsafe {
+        (NSPasteboardTypeString, NSPasteboardTypeHTML, NSPasteboardTypeRTF, NSPasteboardTypePNG, NSPasteboardTypeTIFF)
+    };
+    let read_string = |kind: &NSPasteboardType| pasteboard.stringForType(kind).map(|s| s.to_string());
+    let png = pasteboard
+        .dataForType(png)
+        .map(|data| data.to_vec())
+        // Screenshots and most image copies are TIFF only.
+        .or_else(|| pasteboard.dataForType(tiff).and_then(|data| tiff_to_png(&data)));
+    Contents {
+        text: read_string(string).map(normalize_newlines),
+        html: read_string(html),
+        rtf: pasteboard.dataForType(rtf).map(|data| data.to_vec()),
+        png,
+        files: file_paths(&pasteboard),
+    }
+}
+
+fn write_general(contents: &Contents) -> Result<()> {
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+    let written = if contents.files.is_empty() {
+        let item = pasteboard_item(contents);
+        pasteboard.writeObjects(&NSArray::from_retained_slice(&[ProtocolObject::from_retained(item)]))
+    } else {
+        // One item per file, as Finder does.
+        let urls: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = contents
+            .files
+            .iter()
+            .map(|path| {
+                let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+                ProtocolObject::from_retained(url)
+            })
+            .collect();
+        pasteboard.writeObjects(&NSArray::from_retained_slice(&urls))
+    };
+    if written { Ok(()) } else { Err(Error::Clipboard("the pasteboard rejected the new contents".into())) }
+}
+
+fn pasteboard_item(contents: &Contents) -> Retained<NSPasteboardItem> {
+    let (string, html, rtf, png, tiff) = unsafe {
+        (NSPasteboardTypeString, NSPasteboardTypeHTML, NSPasteboardTypeRTF, NSPasteboardTypePNG, NSPasteboardTypeTIFF)
+    };
+    let item = NSPasteboardItem::new();
+    if let Some(text) = &contents.text {
+        item.setString_forType(&NSString::from_str(text), string);
+    }
+    if let Some(markup) = &contents.html {
+        item.setData_forType(&NSData::with_bytes(markup.as_bytes()), html);
+    }
+    if let Some(data) = &contents.rtf {
+        item.setData_forType(&NSData::with_bytes(data), rtf);
+    }
+    if let Some(data) = &contents.png {
+        item.setData_forType(&NSData::with_bytes(data), png);
+        // Plenty of Mac apps (Preview's "New from Clipboard", Keynote) only
+        // look for TIFF.
+        if let Some(data) = png_to_tiff(data) {
+            item.setData_forType(&data, tiff);
+        }
+    }
+    item
+}
+
+fn file_paths(pasteboard: &NSPasteboard) -> Vec<PathBuf> {
+    let Some(items) = pasteboard.pasteboardItems() else {
+        return Vec::new();
+    };
+    let file_url = unsafe { NSPasteboardTypeFileURL };
+    items
+        .iter()
+        .filter_map(|item| {
+            let url = NSURL::URLWithString(&*item.stringForType(file_url)?)?;
+            // Finder hands out file reference URLs (file:///.file/id=...).
+            let url = url.filePathURL().unwrap_or(url);
+            Some(PathBuf::from(url.path()?.to_string()))
+        })
+        .collect()
+}
+
+fn tiff_to_png(tiff: &NSData) -> Option<Vec<u8>> {
+    let rep = NSBitmapImageRep::imageRepWithData(tiff)?;
+    let png = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }?;
+    Some(png.to_vec())
+}
+
+fn png_to_tiff(png: &[u8]) -> Option<Retained<NSData>> {
+    NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(png))?.TIFFRepresentation()
 }

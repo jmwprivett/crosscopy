@@ -12,17 +12,21 @@
 use crate::discovery::{Discovery, DiscoveryEvent, SYNC_SERVICE};
 use crate::identity::Identity;
 use crate::tls::{self, PinSet, Trust};
+use crate::transfer::{self, Offer};
 use anyhow::{Context, Result};
-use crosscopy_core::{ALPN, DeviceId, MAX_MESSAGE_BYTES, Message};
+use crosscopy_core::{ALPN, DeviceId, FileManifest, MAX_MESSAGE_BYTES, Message};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{Connection, Endpoint, IdleTimeout, TransportConfig};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
 use tokio::task::AbortHandle;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 const KEEP_ALIVE: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -74,6 +78,8 @@ struct Inner {
     connections: Mutex<HashMap<DeviceId, PeerConnection>>,
     discovery: Mutex<Option<Discovery>>,
     inbox: mpsc::Sender<Incoming>,
+    /// Recently copied files that peers may fetch, newest last.
+    offers: Mutex<VecDeque<(Uuid, Offer)>>,
 }
 
 struct PeerEntry {
@@ -125,6 +131,7 @@ impl Node {
             connections: Mutex::default(),
             discovery: Mutex::default(),
             inbox,
+            offers: Mutex::default(),
         });
         tokio::spawn(accept_loop(inner.clone()));
 
@@ -202,6 +209,33 @@ impl Node {
             warn!(peer = %self.inner.name(id), "send queue full; dropping message");
         }
         queued
+    }
+
+    /// Lets peers fetch the files of clip `item`. `sources` are the local
+    /// paths of the manifest's files, in manifest order.
+    pub fn offer_files(&self, item: Uuid, sources: Vec<PathBuf>) {
+        let mut offers = self.inner.offers.lock().unwrap();
+        offers.push_back((item, sources.into()));
+        while offers.len() > transfer::MAX_OFFERS {
+            offers.pop_front();
+        }
+    }
+
+    /// Downloads the files of clip `item` from `peer` into `dest`, refusing
+    /// to receive more than `limit` bytes. Received bytes are added to
+    /// `progress` as they arrive.
+    pub async fn fetch_files(
+        &self,
+        peer: DeviceId,
+        item: Uuid,
+        manifest: &FileManifest,
+        dest: &Path,
+        limit: u64,
+        progress: &AtomicU64,
+    ) -> Result<()> {
+        let conn = self.inner.connections.lock().unwrap().get(&peer).map(|pc| pc.conn.clone());
+        let conn = conn.with_context(|| format!("{} is not connected", self.inner.name(peer)))?;
+        transfer::fetch(&conn, item, manifest, dest, limit, progress).await
     }
 
     /// Names of currently connected peers.
@@ -437,6 +471,7 @@ async fn serve(inner: Arc<Inner>, id: DeviceId, conn: Connection, dialed: bool) 
     let name = inner.name(id);
     let (outbox, outbox_rx) = mpsc::channel(SEND_QUEUE);
     tokio::spawn(write_loop(conn.clone(), outbox_rx, name.clone()));
+    tokio::spawn(serve_fetches(inner.clone(), conn.clone(), name.clone()));
     let dialer = if dialed { inner.identity.id } else { id };
     match inner.register(id, PeerConnection { conn: conn.clone(), outbox, dialer }) {
         Registration::New => info!(peer = %name, remote = %conn.remote_address(), "connected"),
@@ -479,6 +514,23 @@ async fn serve(inner: Arc<Inner>, id: DeviceId, conn: Connection, dialed: bool) 
         info!(peer = %name, "disconnected: {reason}");
     } else {
         debug!(peer = %name, "secondary connection closed: {reason}");
+    }
+}
+
+/// Answers the peer's requests for offered files until the connection ends.
+async fn serve_fetches(inner: Arc<Inner>, conn: Connection, name: String) {
+    while let Ok((send, recv)) = conn.accept_bi().await {
+        let (inner, name) = (inner.clone(), name.clone());
+        tokio::spawn(async move {
+            let lookup = |item: Uuid| {
+                let offers = inner.offers.lock().unwrap();
+                offers.iter().find(|(id, _)| *id == item).map(|(_, offer)| offer.clone())
+            };
+            match transfer::serve(send, recv, lookup).await {
+                Ok(()) => debug!(peer = %name, "served file request"),
+                Err(e) => warn!(peer = %name, "sending files failed: {e:#}"),
+            }
+        });
     }
 }
 

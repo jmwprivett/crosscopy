@@ -21,7 +21,7 @@ DisableProgramGroupPage=yes
 OutputDir=..\..\dist
 OutputBaseFilename=CrossCopy-{#AppVersion}-windows-x86_64-setup
 SetupIconFile=..\..\dist\crosscopy.ico
-UninstallDisplayIcon={app}\CrossCopy.exe
+UninstallDisplayIcon={app}\crosscopy-tray.exe
 UninstallDisplayName=CrossCopy
 Compression=lzma2
 SolidCompression=yes
@@ -36,24 +36,24 @@ RestartApplications=no
 Name: "autostart"; Description: "Start CrossCopy when I sign in"
 
 [Files]
-Source: "..\..\target\release\crosscopy-tray.exe"; DestDir: "{app}"; DestName: "CrossCopy.exe"; Flags: ignoreversion
+Source: "..\..\target\release\crosscopy-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\crosscopy.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{userprograms}\CrossCopy"; Filename: "{app}\CrossCopy.exe"
+Name: "{userprograms}\CrossCopy"; Filename: "{app}\crosscopy-tray.exe"
 
 [Registry]
 ; Same value the app's "Start at login" toggle manages. Not touched during
 ; self-updates, so a choice made in the app sticks.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CrossCopy"; ValueData: """{app}\CrossCopy.exe"""; Flags: uninsdeletevalue; Tasks: autostart; Check: not IsUpdate
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CrossCopy"; ValueData: """{app}\crosscopy-tray.exe"""; Flags: uninsdeletevalue; Tasks: autostart; Check: not IsUpdate
 
 [Run]
-Filename: "{app}\CrossCopy.exe"; Description: "Start CrossCopy"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\crosscopy-tray.exe"; Description: "Start CrossCopy"; Flags: nowait postinstall skipifsilent
 ; Self-update (`/update=1`): restart the app after a silent install.
-Filename: "{app}\CrossCopy.exe"; Flags: nowait; Check: IsUpdate
+Filename: "{app}\crosscopy-tray.exe"; Flags: nowait; Check: IsUpdate
 
 [UninstallRun]
-Filename: "{sys}\taskkill.exe"; Parameters: "/IM CrossCopy.exe /F"; Flags: runhidden; RunOnceId: "StopCrossCopy"
+Filename: "{sys}\taskkill.exe"; Parameters: "/IM crosscopy-tray.exe /F"; Flags: runhidden; RunOnceId: "StopCrossCopy"
 
 [Code]
 function IsUpdate: Boolean;
